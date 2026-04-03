@@ -209,12 +209,21 @@ export default function ShareSettlementPage() {
             .in('expense_id', expenseIds);
 
           if (fullItemsQuery.error) {
-            const fallbackItemsQuery = await supabase
+            const withoutQtyMapQuery = await supabase
               .from('items')
-              .select('id, expense_id, name, base_price, tax_multiplier, qty_map')
+              .select('id, expense_id, name, final_price, base_price, tax_multiplier')
               .in('expense_id', expenseIds);
-            if (fallbackItemsQuery.error) throw new Error(fallbackItemsQuery.error.message);
-            rawItems = (fallbackItemsQuery.data ?? []) as Array<Record<string, unknown>>;
+
+            if (withoutQtyMapQuery.error) {
+              const minimalItemsQuery = await supabase
+                .from('items')
+                .select('id, expense_id, name, base_price, tax_multiplier')
+                .in('expense_id', expenseIds);
+              if (minimalItemsQuery.error) throw new Error(minimalItemsQuery.error.message);
+              rawItems = (minimalItemsQuery.data ?? []) as Array<Record<string, unknown>>;
+            } else {
+              rawItems = (withoutQtyMapQuery.data ?? []) as Array<Record<string, unknown>>;
+            }
           } else {
             rawItems = (fullItemsQuery.data ?? []) as Array<Record<string, unknown>>;
           }
