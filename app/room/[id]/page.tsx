@@ -234,6 +234,37 @@ function isMissingBucketError(error: unknown) {
   return message.includes('bucket not found') || (message.includes('bucket') && message.includes('not found'));
 }
 
+function readErrorMessage(error: unknown) {
+  if (typeof error === 'string') return error;
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === 'object' && 'message' in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string') return message;
+  }
+  return '';
+}
+
+function isRlsPolicyError(error: unknown) {
+  const message = readErrorMessage(error).toLowerCase();
+  return (
+    message.includes('row-level security policy') ||
+    message.includes('row level security policy') ||
+    message.includes('violates row-level security')
+  );
+}
+
+function formatDbErrorMessage(error: unknown, fallback: string) {
+  if (isRlsPolicyError(error)) {
+    const message = readErrorMessage(error);
+    const tableMatch = message.match(/table\s+"?([a-zA-Z0-9_]+)"?/i);
+    const tableName = tableMatch?.[1] ? ` for table "${tableMatch[1]}"` : '';
+    return `Database permissions are blocking this action${tableName}. Apply the latest Supabase RLS migration for BillWizard and try again.`;
+  }
+
+  const message = readErrorMessage(error).trim();
+  return message || fallback;
+}
+
 function getInitials(name: string) {
   const clean = name.replace(/\(.*?\)/g, '').trim();
   const parts = clean.split(/\s+/).filter(Boolean).slice(0, 2);
@@ -2049,7 +2080,7 @@ export default function RoomPage() {
       }
 
       if (createQuery.error || !createQuery.data?.id) {
-        throw new Error(createQuery.error?.message ?? 'Unable to create expense.');
+        throw new Error(formatDbErrorMessage(createQuery.error, 'Unable to create expense.'));
       }
 
       return String(createQuery.data.id);
@@ -2235,7 +2266,7 @@ export default function RoomPage() {
         }`
       );
     } catch (error) {
-      pushToast('error', error instanceof Error ? error.message : 'Unable to create scanned expense.');
+      pushToast('error', formatDbErrorMessage(error, 'Unable to create scanned expense.'));
     } finally {
       stopScanProgressTicker();
       setScanningReceipt(false);
@@ -2270,7 +2301,7 @@ export default function RoomPage() {
 
       router.push(`/room/${data.id}`);
     } catch (error) {
-      pushToast('error', error instanceof Error ? error.message : 'Unable to create a new room.');
+      pushToast('error', formatDbErrorMessage(error, 'Unable to create a new room.'));
     } finally {
       setCreatingRoom(false);
     }
