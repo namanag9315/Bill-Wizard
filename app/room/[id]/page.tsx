@@ -22,6 +22,7 @@ import ItemRow, { ItemEditDraft, ItemRowModel, ItemRowParticipant } from '@/comp
 import SettlementDashboard, { SettlementEntry } from '@/components/SettlementDashboard';
 import { MobileTabBar, Sidebar, SidebarTab } from '@/components/Sidebar';
 import { TaxCategoryKey } from '@/components/billwizardTokens';
+import { exportToExcel } from '@/lib/exportToExcel';
 import { getSupabaseBrowserClient } from '@/utils/supabase';
 
 type ParticipantRecord = {
@@ -1018,17 +1019,6 @@ export default function RoomPage() {
     });
   }, [participantLedger, selectedCollectorId, settledAmountsByParticipant]);
 
-  const settlementExportRows = useMemo(
-    () =>
-      participantLedger.map((entry) => ({
-        User: entry.name,
-        'Total Paid Upfront': Number(entry.totalPaidUpfront.toFixed(2)),
-        'Total Consumed': Number(entry.totalConsumed.toFixed(2)),
-        'Net Balance': Number(entry.netBalance.toFixed(2))
-      })),
-    [participantLedger]
-  );
-
   useEffect(() => {
     if (participantLedger.length === 0) return;
 
@@ -1051,36 +1041,6 @@ export default function RoomPage() {
       return preferredCollectorId;
     });
   }, [participantLedger, participantsById]);
-
-  const itemizedExportRows = useMemo(
-    () =>
-      items.map((item) => {
-        const expense = expenses.find((row) => row.id === item.expense_id);
-        const payer = expense ? participantsById[expense.payer_id] : null;
-        const qtyMap = qtyMapByItem[item.id] ?? {};
-
-        const sharedBy = Object.entries(qtyMap)
-          .filter(([, shares]) => shares > 0)
-          .map(([participantId, shares]) => `${participantsById[participantId]?.name ?? 'Unknown'} (${shares})`)
-          .join(', ');
-
-        return {
-          Expense: expense?.title ?? 'Untitled',
-          'Expense Type': expense?.expense_type ?? 'manual',
-          Payer: payer?.name ?? 'Unknown',
-          Item: item.name,
-          Category: item.categoryName,
-          'Tax Category': item.taxCategory,
-          Quantity: item.quantity,
-          'Unit Price': Number(item.unitPrice.toFixed(2)),
-          'Total Row Price': Number(item.totalRowPrice.toFixed(2)),
-          'Tax Multiplier': Number(item.taxMultiplier.toFixed(3)),
-          'Final Post-Tax': Number(item.finalPrice.toFixed(2)),
-          'Shared By': sharedBy
-        };
-      }),
-    [expenses, items, participantsById, qtyMapByItem]
-  );
 
   const updateCollectorSelection = useCallback(
     (participantRows: ParticipantRecord[]) => {
@@ -2949,60 +2909,109 @@ export default function RoomPage() {
   const handleExportToExcel = useCallback(async () => {
     setExportingWorkbook(true);
     try {
-      const XLSX = await import('xlsx');
-      const workbook = XLSX.utils.book_new();
+      if (participants.length === 0) {
+        throw new Error('Add participants before exporting the report.');
+      }
 
-      const settlementSheet =
-        settlementExportRows.length > 0
-          ? XLSX.utils.json_to_sheet(settlementExportRows)
-          : XLSX.utils.aoa_to_sheet([['User', 'Total Paid Upfront', 'Total Consumed', 'Net Balance']]);
-      settlementSheet['!cols'] = [{ wch: 24 }, { wch: 18 }, { wch: 16 }, { wch: 14 }];
+      const fallbackCollectorId =
+        participantLedger.find((row) => row.receivesAmount > 0.0001)?.participantId ?? participants[0]?.id ?? null;
+      const payerParticipantId =
+        selectedCollectorId && participantsById[selectedCollectorId] ? selectedCollectorId : fallbackCollectorId;
 
-      const itemizedSheet =
-        itemizedExportRows.length > 0
-          ? XLSX.utils.json_to_sheet(itemizedExportRows)
-          : XLSX.utils.aoa_to_sheet([
-              [
-                'Expense',
-                'Expense Type',
-                'Payer',
-                'Item',
-                'Category',
-                'Tax Category',
-                'Quantity',
-                'Unit Price',
-                'Total Row Price',
-                'Tax Multiplier',
-                'Final Post-Tax',
-                'Shared By'
-              ]
-            ]);
-      itemizedSheet['!cols'] = [
-        { wch: 24 },
-        { wch: 12 },
-        { wch: 20 },
-        { wch: 24 },
-        { wch: 24 },
-        { wch: 12 },
-        { wch: 8 },
-        { wch: 12 },
-        { wch: 14 },
-        { wch: 12 },
-        { wch: 14 },
-        { wch: 32 }
-      ];
+      if (!payerParticipantId) {
+        throw new Error('Unable to identify the payer for settlement export.');
+      }
 
-      XLSX.utils.book_append_sheet(workbook, settlementSheet, 'Settlement');
-      XLSX.utils.book_append_sheet(workbook, itemizedSheet, 'Itemized');
-      XLSX.writeFile(workbook, 'BillWizard_TripLedger.xlsx');
+      const roomName = (expenses[0]?.title ?? '').trim() || `Trip Room ${roomId.slice(0, 6)}`;
+      const summaryByParticipantId = new Map(
+        participantLedger.map((entry) => [entry.participantId, entry] as const)
+      );
+      const settlementByParticipantId = new Map(
+        settlementEntries.map((entry) => [entry.participantId, entry] as const)
+      );
 
-      pushToast('success', 'Excel exported: BillWizard_TripLedger.xlsx');
+      const exportItems = items.map((item) => ({
+        id: item.id,
+        expenseId: item.expense_id,
+        name: item.name,
+        category: item.categoryName,
+        taxCategory: item.taxCategory,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        basePrice: Number(item.basePrice.toFixed(2)),
+        finalPrice: Number(item.finalPrice.toFixed(2)),
+        multiplier: Number(item.taxMultiplier.toFixed(3)),
+        qtyMap: qtyMapByItem[item.id] ?? {},
+        createdAt: null
+      }));
+
+      const exportPeople = participants.map((participant) => {
+        const summary = summaryByParticipantId.get(participant.id);
+        const settlement = settlementByParticipantId.get(participant.id);
+        const itemsShared = items.reduce((count, item) => {
+          const shares = qtyMapByItem[item.id]?.[participant.id] ?? 0;
+          return shares > 0 ? count + 1 : count;
+        }, 0);
+
+        return {
+          id: participant.id,
+          name: participant.name,
+          initials: getInitials(participant.name),
+          upiId: participant.upi_id ?? null,
+          itemsShared,
+          totalShare: Number((summary?.totalConsumed ?? 0).toFixed(2)),
+          paidUpfront: Number((summary?.totalPaidUpfront ?? 0).toFixed(2)),
+          netBalance: Number(((summary?.totalConsumed ?? 0) - (summary?.totalPaidUpfront ?? 0)).toFixed(2)),
+          isSettled: Boolean(settlement?.isMarkedSettled)
+        };
+      });
+
+      const payer = exportPeople.find((person) => person.id === payerParticipantId);
+      if (!payer) {
+        throw new Error('Unable to resolve payer details for export.');
+      }
+
+      const baseTotal = exportItems.reduce((sum, item) => sum + item.basePrice, 0);
+      const taxConfig = {
+        discountPct: 10,
+        gstPct: 5,
+        multiplier: baseTotal > 0 ? totalExpenseSoFar / baseTotal : 1
+      };
+
+      const roomUrl = `${publicShareBaseUrl}/room/${encodeURIComponent(roomId)}`;
+      await exportToExcel(
+        {
+          id: roomId,
+          name: roomName,
+          url: roomUrl,
+          totalBill: Number(totalExpenseSoFar.toFixed(2))
+        },
+        exportItems,
+        exportPeople,
+        payer,
+        taxConfig
+      );
+
+      pushToast('success', 'Excel exported: styled finance report generated.');
     } catch (error) {
       pushToast('error', error instanceof Error ? error.message : 'Unable to export Excel.');
     } finally {
       setExportingWorkbook(false);
     }
-  }, [itemizedExportRows, pushToast, settlementExportRows]);
+  }, [
+    expenses,
+    items,
+    participantLedger,
+    participants,
+    participantsById,
+    publicShareBaseUrl,
+    pushToast,
+    qtyMapByItem,
+    roomId,
+    selectedCollectorId,
+    settlementEntries,
+    totalExpenseSoFar
+  ]);
 
   if (loadingRoom) {
     return (
