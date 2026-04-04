@@ -228,6 +228,12 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function isMissingBucketError(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return message.includes('bucket not found') || (message.includes('bucket') && message.includes('not found'));
+}
+
 function getInitials(name: string) {
   const clean = name.replace(/\(.*?\)/g, '').trim();
   const parts = clean.split(/\s+/).filter(Boolean).slice(0, 2);
@@ -637,6 +643,7 @@ export default function RoomPage() {
   const itemIdsRef = useRef<Set<string>>(new Set());
   const participantIdsRef = useRef<Set<string>>(new Set());
   const receiptPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const scanProgressTimerRef = useRef<number | null>(null);
   const receiptGestureRef = useRef({
     startScale: 1,
     startDistance: 0,
@@ -660,6 +667,27 @@ export default function RoomPage() {
       toastTimerRef.current = null;
     }, 3800);
   }, []);
+
+  const stopScanProgressTicker = useCallback(() => {
+    if (scanProgressTimerRef.current !== null) {
+      window.clearInterval(scanProgressTimerRef.current);
+      scanProgressTimerRef.current = null;
+    }
+  }, []);
+
+  const startScanProgressTicker = useCallback(
+    (cap: number) => {
+      stopScanProgressTicker();
+      scanProgressTimerRef.current = window.setInterval(() => {
+        setScanProgressPct((current) => {
+          if (current >= cap) return current;
+          const step = current < 35 ? 2.8 : current < 70 ? 1.4 : 0.7;
+          return Math.min(cap, Number((current + step).toFixed(1)));
+        });
+      }, 280);
+    },
+    [stopScanProgressTicker]
+  );
 
   const loadParticipantIdentityRows = useCallback(async () => {
     const supabase = getSupabase();
@@ -707,6 +735,9 @@ export default function RoomPage() {
     return () => {
       if (toastTimerRef.current) {
         window.clearTimeout(toastTimerRef.current);
+      }
+      if (scanProgressTimerRef.current) {
+        window.clearInterval(scanProgressTimerRef.current);
       }
     };
   }, []);
@@ -2069,17 +2100,31 @@ export default function RoomPage() {
     }
 
     setScanningReceipt(true);
+    stopScanProgressTicker();
     setScanProgressPct(8);
     setScanProgressLabel('Uploading receipt image...');
+    startScanProgressTicker(34);
 
     try {
-      const receiptUrl = await uploadReceiptToStorage(scanFile);
-      setScanProgressPct(40);
+      let receiptUrl: string | null = null;
+      let skippedReceiptUpload = false;
+
+      try {
+        receiptUrl = await uploadReceiptToStorage(scanFile);
+      } catch (uploadError) {
+        if (!isMissingBucketError(uploadError)) throw uploadError;
+        skippedReceiptUpload = true;
+        setScanProgressPct((current) => Math.max(current, 30));
+        setScanProgressLabel('Storage bucket missing. Continuing analysis without image backup...');
+      }
+
+      setScanProgressPct((current) => Math.max(current, 42));
       setScanProgressLabel('Analyzing receipt with AI...');
+      startScanProgressTicker(78);
 
       const formData = new FormData();
       formData.append('file', scanFile);
-      formData.append('receipt_url', receiptUrl);
+      if (receiptUrl) formData.append('receipt_url', receiptUrl);
 
       const response = await fetch('/api/scan-receipt', {
         method: 'POST',
@@ -2094,8 +2139,9 @@ export default function RoomPage() {
       };
 
       if (!response.ok) throw new Error(payload.error ?? 'Receipt scan failed.');
-      setScanProgressPct(62);
+      setScanProgressPct((current) => Math.max(current, 82));
       setScanProgressLabel('Saving expense and split details...');
+      startScanProgressTicker(94);
 
       const scannedItems = extractScannedItems(payload);
       if (scannedItems.length === 0) {
@@ -2104,7 +2150,7 @@ export default function RoomPage() {
 
       const supabase = getSupabase();
       const expenseId = await createExpense(title, payerId, 'receipt', {
-        receiptUrl: payload.receiptUrl || receiptUrl
+        receiptUrl: payload.receiptUrl || receiptUrl || null
       });
 
       const insertRows = scannedItems.map((item) => ({
@@ -2160,6 +2206,7 @@ export default function RoomPage() {
         if (assignmentInsert.error) throw new Error(assignmentInsert.error.message);
       }
 
+      stopScanProgressTicker();
       setScanProgressPct(100);
       setScanProgressLabel('Done.');
       setExpandedExpenseIds((current) => {
@@ -2181,11 +2228,16 @@ export default function RoomPage() {
           waterItemIds.length > 0
             ? ` ${waterItemIds.length} water item${waterItemIds.length > 1 ? 's' : ''} auto-split to everyone.`
             : ''
+        }${
+          skippedReceiptUpload
+            ? ' Receipt image was not saved because storage bucket "receipts" is missing. Create that bucket in Supabase to enable receipt viewing.'
+            : ''
         }`
       );
     } catch (error) {
       pushToast('error', error instanceof Error ? error.message : 'Unable to create scanned expense.');
     } finally {
+      stopScanProgressTicker();
       setScanningReceipt(false);
       setScanProgressPct(0);
       setScanProgressLabel('');
@@ -2199,6 +2251,8 @@ export default function RoomPage() {
     scanFile,
     scanPayerId,
     selectedCollectorId,
+    startScanProgressTicker,
+    stopScanProgressTicker,
     uploadReceiptToStorage
   ]);
 
@@ -3384,6 +3438,7 @@ export default function RoomPage() {
                   onClick={() => {
                     setShowScanModal(true);
                     setScanPayerId(selectedCollectorId ?? '');
+                    stopScanProgressTicker();
                     setScanProgressPct(0);
                     setScanProgressLabel('');
                   }}
@@ -4057,6 +4112,9 @@ export default function RoomPage() {
                     style={{ width: `${Math.max(6, Math.round(scanProgressPct))}%` }}
                   />
                 </div>
+                <p className="mt-[6px] text-[10px] text-muted">
+                  Processing can take up to 20 seconds for detailed receipts.
+                </p>
               </div>
             ) : null}
 
@@ -4067,6 +4125,7 @@ export default function RoomPage() {
                 onClick={() => {
                   setShowScanModal(false);
                   setScanFile(null);
+                  stopScanProgressTicker();
                   setScanProgressPct(0);
                   setScanProgressLabel('');
                 }}
