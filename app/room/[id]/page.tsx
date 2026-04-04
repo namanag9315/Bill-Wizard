@@ -17,6 +17,7 @@ import {
   ChevronUp,
   Download,
   ExternalLink,
+  History,
   Loader2,
   Pencil,
   Plus,
@@ -3427,6 +3428,15 @@ export default function RoomPage() {
 
                 <button
                   type="button"
+                  onClick={() => router.push('/settings?tab=activity')}
+                  className="inline-flex h-[34px] items-center gap-[6px] rounded-input border border-[#E0DDD6] bg-white px-[11px] text-[12px] text-[#1C1917] transition-[background-color] duration-150 ease-linear hover:bg-dim"
+                >
+                  <History className="h-[12px] w-[12px]" />
+                  View Logs
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => setShowAddUserModal(true)}
                   className="inline-flex h-[34px] items-center gap-[6px] rounded-input border border-[#E0DDD6] bg-white px-[11px] text-[12px] text-[#1C1917] transition-[background-color] duration-150 ease-linear hover:bg-dim"
                 >
@@ -3580,18 +3590,18 @@ export default function RoomPage() {
                                 <p className="text-[10px] uppercase tracking-[0.8px] text-muted">
                                   Receipt
                                 </p>
-                                {expense.receipt_url ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => openReceiptViewer(expense.receipt_url ?? '', expense.title)}
-                                    className="inline-flex h-[28px] items-center gap-[6px] rounded-input border border-border bg-white px-[10px] text-[11px] font-medium text-[#1C1917] transition-[background-color] duration-150 ease-linear hover:bg-dim"
-                                  >
-                                    <ExternalLink className="h-[11px] w-[11px]" />
-                                    View Receipt
-                                  </button>
-                                ) : (
-                                  <p className="text-[11px] text-muted">Receipt image unavailable for this expense.</p>
-                                )}
+                                <button
+                                  type="button"
+                                  disabled={!expense.receipt_url}
+                                  onClick={() => {
+                                    if (!expense.receipt_url) return;
+                                    openReceiptViewer(expense.receipt_url, expense.title);
+                                  }}
+                                  className="inline-flex h-[28px] items-center gap-[6px] rounded-input border border-border bg-white px-[10px] text-[11px] font-medium text-[#1C1917] transition-[background-color] duration-150 ease-linear hover:bg-dim disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                  <ExternalLink className="h-[11px] w-[11px]" />
+                                  {expense.receipt_url ? 'View Receipt' : 'View Receipt (Unavailable)'}
+                                </button>
                               </div>
                             ) : null}
 

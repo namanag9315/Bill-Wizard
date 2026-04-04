@@ -277,6 +277,19 @@ export default function SettingsPage() {
   }, [profile.defaultName]);
 
   useEffect(() => {
+    const tab = String(new URLSearchParams(window.location.search).get('tab') ?? '')
+      .trim()
+      .toLowerCase();
+    if (tab === 'activity') {
+      setActiveView('activity');
+      return;
+    }
+    if (tab === 'profile') {
+      setActiveView('profile');
+    }
+  }, []);
+
+  useEffect(() => {
     if (activeView !== 'activity') return;
     void fetchActivityLogs();
   }, [activeView, fetchActivityLogs]);
