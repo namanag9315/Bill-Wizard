@@ -1,4 +1,4 @@
-import { FileText, Home, IndianRupee, Loader2, Plus, Settings as SettingsIcon } from 'lucide-react';
+import { FileText, History, Home, IndianRupee, Loader2, Plus, Settings as SettingsIcon } from 'lucide-react';
 
 export type SidebarTab = 'home' | 'past-splits' | 'settings';
 
@@ -24,6 +24,7 @@ type SidebarProps = {
   currentUser: SidebarUser | null;
   onCreateRoom?: () => void;
   creatingRoom?: boolean;
+  onViewLogs?: () => void;
 };
 
 type MobileTabBarProps = {
@@ -49,7 +50,8 @@ export function Sidebar({
   participants,
   currentUser,
   onCreateRoom,
-  creatingRoom = false
+  creatingRoom = false,
+  onViewLogs
 }: SidebarProps) {
   return (
     <aside className="flex h-full flex-col bg-navy-950 text-navy-100">
@@ -106,6 +108,19 @@ export function Sidebar({
             >
               {creatingRoom ? <Loader2 className="h-[11px] w-[11px] animate-spin" /> : <Plus className="h-[11px] w-[11px]" />}
               {creatingRoom ? 'Creating Room...' : 'New Room'}
+            </button>
+          </div>
+        ) : null}
+
+        {onViewLogs ? (
+          <div className="mt-[8px] px-[4px]">
+            <button
+              type="button"
+              onClick={onViewLogs}
+              className="inline-flex h-[30px] w-full items-center justify-center gap-[6px] rounded-[8px] border border-[rgba(148,163,184,0.4)] bg-[rgba(148,163,184,0.08)] px-[10px] text-[10px] font-medium text-[#CBD5E1] transition-[background-color] duration-150 ease-linear hover:bg-[rgba(148,163,184,0.18)]"
+            >
+              <History className="h-[10px] w-[10px]" />
+              View Logs
             </button>
           </div>
         ) : null}

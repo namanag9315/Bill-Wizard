@@ -11,19 +11,22 @@ import {
   useState
 } from 'react';
 import {
+  Banknote,
   Check,
   Camera,
   ChevronDown,
   ChevronUp,
   Download,
   ExternalLink,
-  History,
   Loader2,
   Pencil,
   Plus,
+  ReceiptText,
   RotateCcw,
+  Split,
   Sparkles,
   Trash2,
+  Users,
   ZoomIn,
   ZoomOut,
   X,
@@ -157,6 +160,14 @@ type CustomItemForm = {
   taxMultiplier: string;
 };
 
+type RoomActivityLogRow = {
+  id: string;
+  action_type: string;
+  description: string;
+  created_at: string;
+  session_id: string | null;
+};
+
 const RECEIPT_CATEGORY_ORDER: ReceiptCategory[] = [
   'Veg Food',
   'Non-Veg Food',
@@ -275,6 +286,73 @@ function formatDbErrorMessage(error: unknown, fallback: string) {
 
   const message = readErrorMessage(error).trim();
   return message || fallback;
+}
+
+function formatRoomActivityRelativeTime(createdAt: string) {
+  const createdTs = new Date(createdAt).getTime();
+  if (!Number.isFinite(createdTs)) return 'Just now';
+
+  const diffSeconds = Math.max(1, Math.round((Date.now() - createdTs) / 1000));
+  if (diffSeconds < 60) return 'Just now';
+  const diffMinutes = Math.floor(diffSeconds / 60);
+  if (diffMinutes < 60) return `${diffMinutes} minute${diffMinutes === 1 ? '' : 's'} ago`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours} hour${diffHours === 1 ? '' : 's'} ago`;
+  if (diffHours < 48) return 'Yesterday';
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays < 7) return `${diffDays} day${diffDays === 1 ? '' : 's'} ago`;
+
+  return new Date(createdTs).toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  });
+}
+
+function resolveRoomActivityVisual(actionType: string) {
+  const normalized = actionType.trim().toLowerCase();
+  if (
+    normalized.includes('expense') ||
+    normalized.includes('receipt') ||
+    normalized === 'expense_added' ||
+    normalized === 'receipt_scanned'
+  ) {
+    return {
+      Icon: ReceiptText,
+      iconClassName: 'text-[#B45309]',
+      nodeClassName: 'border-amber-200 bg-amber-50'
+    };
+  }
+
+  if (normalized.includes('payment') || normalized.includes('settle')) {
+    return {
+      Icon: Banknote,
+      iconClassName: 'text-[#065F46]',
+      nodeClassName: 'border-emerald-200 bg-emerald-50'
+    };
+  }
+
+  if (normalized.includes('split')) {
+    return {
+      Icon: Split,
+      iconClassName: 'text-[#1D4ED8]',
+      nodeClassName: 'border-blue-200 bg-blue-50'
+    };
+  }
+
+  if (normalized.includes('participant') || normalized.includes('user')) {
+    return {
+      Icon: Users,
+      iconClassName: 'text-[#7C3AED]',
+      nodeClassName: 'border-violet-200 bg-violet-50'
+    };
+  }
+
+  return {
+    Icon: Sparkles,
+    iconClassName: 'text-slate-600',
+    nodeClassName: 'border-slate-200 bg-slate-50'
+  };
 }
 
 function getInitials(name: string) {
@@ -608,6 +686,10 @@ export default function RoomPage() {
   const [scanProgressPct, setScanProgressPct] = useState(0);
   const [scanProgressLabel, setScanProgressLabel] = useState('');
   const [creatingRoom, setCreatingRoom] = useState(false);
+  const [showRoomLogsModal, setShowRoomLogsModal] = useState(false);
+  const [loadingRoomLogs, setLoadingRoomLogs] = useState(false);
+  const [roomLogsError, setRoomLogsError] = useState<string | null>(null);
+  const [roomActivityLogs, setRoomActivityLogs] = useState<RoomActivityLogRow[]>([]);
   const [showEndTripModal, setShowEndTripModal] = useState(false);
   const [endTripConfirmationChecked, setEndTripConfirmationChecked] = useState(false);
   const [endingTrip, setEndingTrip] = useState(false);
@@ -2370,6 +2452,53 @@ export default function RoomPage() {
     }
   }, [creatingRoom, getSupabase, pushToast, router]);
 
+  const fetchRoomActivityLogs = useCallback(async () => {
+    setLoadingRoomLogs(true);
+    setRoomLogsError(null);
+    try {
+      const supabase = getSupabase();
+      const { data, error } = await supabase
+        .from('activity_logs')
+        .select('id, action_type, description, created_at, session_id')
+        .eq('session_id', roomId)
+        .order('created_at', { ascending: false })
+        .limit(120);
+
+      if (error) throw new Error(formatDbErrorMessage(error, 'Unable to load logs.'));
+
+      const rows = ((data ?? []) as Array<Record<string, unknown>>)
+        .map((row, index) => ({
+          id: String(row.id ?? `activity-${index}`),
+          action_type: String(row.action_type ?? 'activity'),
+          description: String(row.description ?? '').trim(),
+          created_at:
+            typeof row.created_at === 'string' && row.created_at.trim()
+              ? row.created_at
+              : new Date().toISOString(),
+          session_id: typeof row.session_id === 'string' ? row.session_id : null
+        }))
+        .filter((row) => row.description.length > 0);
+
+      setRoomActivityLogs(rows);
+    } catch (error) {
+      const message = formatDbErrorMessage(error, 'Unable to load logs.');
+      setRoomLogsError(message);
+      setRoomActivityLogs([]);
+    } finally {
+      setLoadingRoomLogs(false);
+    }
+  }, [getSupabase, roomId]);
+
+  const openRoomLogsModal = useCallback(() => {
+    setShowRoomLogsModal(true);
+    void fetchRoomActivityLogs();
+  }, [fetchRoomActivityLogs]);
+
+  const closeRoomLogsModal = useCallback(() => {
+    if (loadingRoomLogs) return;
+    setShowRoomLogsModal(false);
+  }, [loadingRoomLogs]);
+
   const openEndTripModal = useCallback(() => {
     setEndTripConfirmationChecked(false);
     setShowEndTripModal(true);
@@ -3478,6 +3607,7 @@ export default function RoomPage() {
               void handleCreateNewRoom();
             }}
             creatingRoom={creatingRoom}
+            onViewLogs={openRoomLogsModal}
           />
         }
         mobileTabs={<MobileTabBar activeTab={activeTab} onTabChange={setActiveTab} />}
@@ -3492,15 +3622,6 @@ export default function RoomPage() {
               </div>
 
               <div className="flex flex-wrap items-center gap-[8px]">
-                <button
-                  type="button"
-                  onClick={() => router.push('/settings?tab=activity')}
-                  className="inline-flex h-[34px] items-center gap-[6px] rounded-input border border-[#E0DDD6] bg-white px-[11px] text-[12px] text-[#1C1917] transition-[background-color] duration-150 ease-linear hover:bg-dim"
-                >
-                  <History className="h-[12px] w-[12px]" />
-                  View Logs
-                </button>
-
                 <button
                   type="button"
                   onClick={() => setShowAddUserModal(true)}
@@ -4284,6 +4405,82 @@ export default function RoomPage() {
                 {scanningReceipt ? 'Uploading & Analyzing...' : 'Create Expense'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {showRoomLogsModal && (
+        <div className="fixed inset-0 z-[74] flex items-center justify-center bg-black/45 px-[16px]">
+          <div className="w-full max-w-[700px] rounded-card border border-border bg-card p-[16px] shadow-[0_18px_40px_rgba(15,23,42,0.2)]">
+            <div className="flex items-start justify-between gap-[10px]">
+              <div>
+                <p className="text-[10px] uppercase tracking-[0.9px] text-muted">Room Activity</p>
+                <h2 className="mt-[3px] text-[16px] font-medium text-[#1C1917]">Chronological Log</h2>
+                <p className="mt-[2px] text-[12px] text-muted">All major actions captured for this room.</p>
+              </div>
+              <div className="flex items-center gap-[6px]">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void fetchRoomActivityLogs();
+                  }}
+                  disabled={loadingRoomLogs}
+                  className="inline-flex h-[30px] items-center gap-[5px] rounded-input border border-border bg-white px-[10px] text-[11px] text-[#1C1917] transition-[background-color] duration-150 ease-linear hover:bg-dim disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {loadingRoomLogs ? <Loader2 className="h-[11px] w-[11px] animate-spin" /> : null}
+                  Refresh
+                </button>
+                <button
+                  type="button"
+                  onClick={closeRoomLogsModal}
+                  disabled={loadingRoomLogs}
+                  className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-input border border-border bg-white text-[#1C1917] disabled:cursor-not-allowed disabled:opacity-60"
+                  aria-label="Close activity log"
+                >
+                  <X className="h-[12px] w-[12px]" />
+                </button>
+              </div>
+            </div>
+
+            {roomLogsError ? (
+              <div className="mt-[10px] rounded-input border border-[#FECACA] bg-[#FEF2F2] px-[10px] py-[8px] text-[12px] text-[#B91C1C]">
+                {roomLogsError}
+              </div>
+            ) : null}
+
+            {loadingRoomLogs ? (
+              <div className="mt-[12px] inline-flex items-center gap-[6px] rounded-input border border-divider bg-canvas px-[10px] py-[8px] text-[12px] text-muted">
+                <Loader2 className="h-[11px] w-[11px] animate-spin" />
+                Loading activity...
+              </div>
+            ) : roomActivityLogs.length === 0 ? (
+              <div className="mt-[12px] rounded-input border border-dashed border-divider bg-canvas px-[10px] py-[12px] text-[12px] text-muted">
+                No logs yet for this room.
+              </div>
+            ) : (
+              <div className="mt-[12px] ml-4 max-h-[420px] space-y-[10px] overflow-y-auto border-l-2 border-slate-100 pl-[14px] pr-[2px]">
+                {roomActivityLogs.map((log) => {
+                  const visual = resolveRoomActivityVisual(log.action_type);
+                  const Icon = visual.Icon;
+                  return (
+                    <article
+                      key={log.id}
+                      className="relative rounded-[14px] border border-slate-200 bg-white px-[12px] py-[10px] shadow-[0_8px_22px_rgba(15,23,42,0.05)]"
+                    >
+                      <span
+                        className={`absolute -left-[31px] top-[11px] flex h-[27px] w-[27px] items-center justify-center rounded-full border ${visual.nodeClassName}`}
+                      >
+                        <Icon className={`h-[12px] w-[12px] ${visual.iconClassName}`} />
+                      </span>
+                      <p className="text-[13px] text-[#1C1917]">{log.description}</p>
+                      <p className="mt-[3px] text-[11px] text-muted">
+                        {formatRoomActivityRelativeTime(log.created_at)}
+                      </p>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       )}
