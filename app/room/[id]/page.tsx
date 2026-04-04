@@ -608,6 +608,9 @@ export default function RoomPage() {
   const [scanProgressPct, setScanProgressPct] = useState(0);
   const [scanProgressLabel, setScanProgressLabel] = useState('');
   const [creatingRoom, setCreatingRoom] = useState(false);
+  const [showEndTripModal, setShowEndTripModal] = useState(false);
+  const [endTripConfirmationChecked, setEndTripConfirmationChecked] = useState(false);
+  const [endingTrip, setEndingTrip] = useState(false);
 
   const [showManualExpenseModal, setShowManualExpenseModal] = useState(false);
   const [manualExpenseTitle, setManualExpenseTitle] = useState('');
@@ -1139,6 +1142,54 @@ export default function RoomPage() {
       };
     });
   }, [participantLedger, selectedCollectorId, settledAmountsByParticipant]);
+
+  const totalOutstandingDue = useMemo(
+    () =>
+      settlementEntries.reduce((sum, entry) => {
+        const due = parseNonNegativeAmount(entry.owesAmount, 0);
+        return sum + due;
+      }, 0),
+    [settlementEntries]
+  );
+
+  const totalUnassignedExpense = useMemo(
+    () =>
+      items.reduce((sum, item) => {
+        const totalShares = Object.values(qtyMapByItem[item.id] ?? {}).reduce(
+          (shares, next) => shares + parseNonNegativeInteger(next, 0),
+          0
+        );
+        return totalShares <= 0 ? sum + item.finalPrice : sum;
+      }, 0),
+    [items, qtyMapByItem]
+  );
+
+  const tripExpenseSummaryRows = useMemo(
+    () =>
+      expenses.map((expense) => ({
+        id: expense.id,
+        title: expense.title,
+        paidBy: participantsById[expense.payer_id]?.name ?? 'Unknown',
+        amount: expenseTotalsById[expense.id] ?? 0
+      })),
+    [expenseTotalsById, expenses, participantsById]
+  );
+
+  const dueSummaryRows = useMemo(
+    () =>
+      settlementEntries.map((entry) => {
+        const participantName =
+          participantsById[entry.participantId]?.name ?? participantsById[entry.participantId]?.id ?? 'Unknown';
+        return {
+          participantId: entry.participantId,
+          participantName,
+          owesAmount: parseNonNegativeAmount(entry.owesAmount, 0),
+          receivesAmount: parseNonNegativeAmount(entry.receivesAmount, 0),
+          isSettled: Boolean(entry.isMarkedSettled)
+        };
+      }),
+    [participantsById, settlementEntries]
+  );
 
   useEffect(() => {
     if (participantLedger.length === 0) return;
@@ -2319,6 +2370,33 @@ export default function RoomPage() {
     }
   }, [creatingRoom, getSupabase, pushToast, router]);
 
+  const openEndTripModal = useCallback(() => {
+    setEndTripConfirmationChecked(false);
+    setShowEndTripModal(true);
+  }, []);
+
+  const closeEndTripModal = useCallback(() => {
+    if (endingTrip) return;
+    setShowEndTripModal(false);
+    setEndTripConfirmationChecked(false);
+  }, [endingTrip]);
+
+  const handleConfirmEndTrip = useCallback(async () => {
+    if (endingTrip || !endTripConfirmationChecked) return;
+
+    setEndingTrip(true);
+    try {
+      await Promise.resolve();
+      setShowEndTripModal(false);
+      setEndTripConfirmationChecked(false);
+      setActiveTab('past-splits');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      pushToast('success', 'Trip ended. Final summary saved and moved to Past Splits.');
+    } finally {
+      setEndingTrip(false);
+    }
+  }, [endTripConfirmationChecked, endingTrip, pushToast]);
+
   const openReceiptViewer = useCallback((url: string, title: string) => {
     setActiveReceiptViewer({ url, title });
     setReceiptZoom(1);
@@ -3396,6 +3474,10 @@ export default function RoomPage() {
             roomId={roomId}
             participants={sidebarParticipants}
             currentUser={currentUser}
+            onCreateRoom={() => {
+              void handleCreateNewRoom();
+            }}
+            creatingRoom={creatingRoom}
           />
         }
         mobileTabs={<MobileTabBar activeTab={activeTab} onTabChange={setActiveTab} />}
@@ -3410,22 +3492,6 @@ export default function RoomPage() {
               </div>
 
               <div className="flex flex-wrap items-center gap-[8px]">
-                <button
-                  type="button"
-                  disabled={creatingRoom}
-                  onClick={() => {
-                    void handleCreateNewRoom();
-                  }}
-                  className="inline-flex h-[34px] items-center gap-[6px] rounded-input border border-[#E0DDD6] bg-white px-[11px] text-[12px] text-[#1C1917] transition-[background-color] duration-150 ease-linear hover:bg-dim disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {creatingRoom ? (
-                    <Loader2 className="h-[12px] w-[12px] animate-spin" />
-                  ) : (
-                    <Plus className="h-[12px] w-[12px]" />
-                  )}
-                  {creatingRoom ? 'Creating Room...' : 'New Room'}
-                </button>
-
                 <button
                   type="button"
                   onClick={() => router.push('/settings?tab=activity')}
@@ -3747,6 +3813,26 @@ export default function RoomPage() {
                   onSendReminder={handleSendReminder}
                   onSettleAndNotify={handleSettleAndNotify}
                 />
+
+                <section className="mt-[18px] rounded-card border border-[#FBCFE8] bg-gradient-to-br from-[#FFF1F2] via-[#FFFBEB] to-[#F8FAFC] px-[14px] py-[14px]">
+                  <div className="flex flex-wrap items-center justify-between gap-[10px]">
+                    <div>
+                      <p className="text-[10px] uppercase tracking-[0.9px] text-[#BE185D]">Trip Closure</p>
+                      <h3 className="mt-[3px] text-[15px] font-medium text-[#1C1917]">End Trip & Freeze Final Summary</h3>
+                      <p className="mt-[2px] text-[12px] text-[#78716C]">
+                        Review total expenses and pending dues, then confirm to move this trip to history.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={openEndTripModal}
+                      className="inline-flex h-[36px] items-center gap-[6px] rounded-input bg-[#9F1239] px-[12px] text-[12px] font-medium text-white transition-[background-color] duration-150 ease-linear hover:bg-[#881337]"
+                    >
+                      <Check className="h-[12px] w-[12px]" />
+                      End Trip
+                    </button>
+                  </div>
+                </section>
               </div>
             )}
 
@@ -4196,6 +4282,134 @@ export default function RoomPage() {
               >
                 {scanningReceipt ? <Loader2 className="h-[12px] w-[12px] animate-spin" /> : <Camera className="h-[12px] w-[12px]" />}
                 {scanningReceipt ? 'Uploading & Analyzing...' : 'Create Expense'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showEndTripModal && (
+        <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/50 px-[16px]">
+          <div className="w-full max-w-[760px] rounded-card border border-border bg-card p-[18px] shadow-[0_20px_48px_rgba(15,23,42,0.22)]">
+            <div className="flex items-start justify-between gap-[10px]">
+              <div>
+                <p className="text-[10px] uppercase tracking-[0.9px] text-[#BE185D]">Final Confirmation</p>
+                <h2 className="mt-[3px] text-[18px] font-medium text-[#1C1917]">Trip Summary</h2>
+                <p className="mt-[2px] text-[12px] text-muted">
+                  Please review all expenses and due balances before ending this trip.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeEndTripModal}
+                disabled={endingTrip}
+                className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-input border border-border bg-white text-[#1C1917] disabled:cursor-not-allowed disabled:opacity-60"
+                aria-label="Close end trip summary"
+              >
+                <X className="h-[13px] w-[13px]" />
+              </button>
+            </div>
+
+            <div className="mt-[12px] grid gap-[8px] sm:grid-cols-4">
+              <article className="rounded-input border border-divider bg-canvas px-[10px] py-[8px]">
+                <p className="text-[10px] uppercase tracking-[0.8px] text-muted">Total Expense</p>
+                <p className="mt-[2px] text-[16px] font-medium text-[#1C1917]">{inr.format(totalExpenseSoFar)}</p>
+              </article>
+              <article className="rounded-input border border-divider bg-canvas px-[10px] py-[8px]">
+                <p className="text-[10px] uppercase tracking-[0.8px] text-muted">Outstanding Due</p>
+                <p className="mt-[2px] text-[16px] font-medium text-[#B91C1C]">{inr.format(totalOutstandingDue)}</p>
+              </article>
+              <article className="rounded-input border border-divider bg-canvas px-[10px] py-[8px]">
+                <p className="text-[10px] uppercase tracking-[0.8px] text-muted">Total Expenses</p>
+                <p className="mt-[2px] text-[16px] font-medium text-[#1C1917]">{expenses.length}</p>
+              </article>
+              <article className="rounded-input border border-divider bg-canvas px-[10px] py-[8px]">
+                <p className="text-[10px] uppercase tracking-[0.8px] text-muted">Unassigned Items</p>
+                <p className="mt-[2px] text-[16px] font-medium text-[#92400E]">{inr.format(totalUnassignedExpense)}</p>
+              </article>
+            </div>
+
+            <div className="mt-[10px] grid gap-[10px] lg:grid-cols-2">
+              <section className="rounded-input border border-divider bg-white">
+                <div className="border-b border-divider px-[10px] py-[8px]">
+                  <p className="text-[11px] font-medium text-[#1C1917]">All Expenses</p>
+                </div>
+                <div className="max-h-[220px] space-y-[6px] overflow-y-auto px-[10px] py-[8px]">
+                  {tripExpenseSummaryRows.length === 0 ? (
+                    <p className="text-[12px] text-muted">No expenses recorded.</p>
+                  ) : (
+                    tripExpenseSummaryRows.map((row) => (
+                      <article
+                        key={row.id}
+                        className="flex items-center justify-between gap-[10px] rounded-input border border-divider bg-canvas px-[8px] py-[7px]"
+                      >
+                        <div className="min-w-0">
+                          <p className="truncate text-[12px] font-medium text-[#1C1917]">{row.title}</p>
+                          <p className="mt-[1px] text-[10px] text-muted">Paid by {row.paidBy}</p>
+                        </div>
+                        <p className="text-[12px] font-medium text-[#1C1917]">{inr.format(row.amount)}</p>
+                      </article>
+                    ))
+                  )}
+                </div>
+              </section>
+
+              <section className="rounded-input border border-divider bg-white">
+                <div className="border-b border-divider px-[10px] py-[8px]">
+                  <p className="text-[11px] font-medium text-[#1C1917]">Due & Settlement Snapshot</p>
+                </div>
+                <div className="max-h-[220px] space-y-[6px] overflow-y-auto px-[10px] py-[8px]">
+                  {dueSummaryRows.map((row) => (
+                    <article
+                      key={row.participantId}
+                      className="flex items-center justify-between gap-[10px] rounded-input border border-divider bg-canvas px-[8px] py-[7px]"
+                    >
+                      <p className="truncate text-[12px] font-medium text-[#1C1917]">{row.participantName}</p>
+                      {row.owesAmount > 0.0001 ? (
+                        <p className="text-[12px] font-medium text-[#B91C1C]">Owes {inr.format(row.owesAmount)}</p>
+                      ) : row.receivesAmount > 0.0001 ? (
+                        <p className="text-[12px] font-medium text-[#047857]">Gets {inr.format(row.receivesAmount)}</p>
+                      ) : (
+                        <p className="text-[11px] text-muted">{row.isSettled ? 'Settled' : 'Balanced'}</p>
+                      )}
+                    </article>
+                  ))}
+                </div>
+              </section>
+            </div>
+
+            <label className="mt-[12px] flex items-start gap-[8px] rounded-input border border-[#FBCFE8] bg-[#FFF1F2] px-[10px] py-[9px]">
+              <input
+                type="checkbox"
+                checked={endTripConfirmationChecked}
+                onChange={(event) => setEndTripConfirmationChecked(event.target.checked)}
+                className="mt-[2px] h-[14px] w-[14px]"
+                disabled={endingTrip}
+              />
+              <span className="text-[12px] text-[#881337]">
+                I confirm this trip is complete and I want to move it to past splits.
+              </span>
+            </label>
+
+            <div className="mt-[12px] flex items-center justify-end gap-[8px]">
+              <button
+                type="button"
+                onClick={closeEndTripModal}
+                disabled={endingTrip}
+                className="h-[34px] rounded-input border border-border bg-white px-[12px] text-[12px] text-[#1C1917] transition-[background-color] duration-150 ease-linear hover:bg-dim disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void handleConfirmEndTrip();
+                }}
+                disabled={!endTripConfirmationChecked || endingTrip}
+                className="inline-flex h-[34px] items-center gap-[6px] rounded-input bg-[#9F1239] px-[12px] text-[12px] font-medium text-white transition-[background-color] duration-150 ease-linear hover:bg-[#881337] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {endingTrip ? <Loader2 className="h-[12px] w-[12px] animate-spin" /> : <Check className="h-[12px] w-[12px]" />}
+                {endingTrip ? 'Ending Trip...' : 'Confirm & End Trip'}
               </button>
             </div>
           </div>

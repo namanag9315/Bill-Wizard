@@ -1,4 +1,4 @@
-import { FileText, Home, IndianRupee, Settings as SettingsIcon } from 'lucide-react';
+import { FileText, Home, IndianRupee, Loader2, Plus, Settings as SettingsIcon } from 'lucide-react';
 
 export type SidebarTab = 'home' | 'past-splits' | 'settings';
 
@@ -22,6 +22,8 @@ type SidebarProps = {
   roomId: string;
   participants: SidebarParticipant[];
   currentUser: SidebarUser | null;
+  onCreateRoom?: () => void;
+  creatingRoom?: boolean;
 };
 
 type MobileTabBarProps = {
@@ -45,7 +47,9 @@ export function Sidebar({
   currentRoomName,
   roomId,
   participants,
-  currentUser
+  currentUser,
+  onCreateRoom,
+  creatingRoom = false
 }: SidebarProps) {
   return (
     <aside className="flex h-full flex-col bg-navy-950 text-navy-100">
@@ -91,6 +95,20 @@ export function Sidebar({
             );
           })}
         </nav>
+
+        {onCreateRoom ? (
+          <div className="mt-[10px] px-[4px]">
+            <button
+              type="button"
+              onClick={onCreateRoom}
+              disabled={creatingRoom}
+              className="inline-flex h-[32px] w-full items-center justify-center gap-[6px] rounded-[8px] border border-[rgba(245,158,11,0.32)] bg-[rgba(245,158,11,0.16)] px-[10px] text-[11px] font-medium text-[#FDE68A] transition-[background-color] duration-150 ease-linear hover:bg-[rgba(245,158,11,0.24)] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {creatingRoom ? <Loader2 className="h-[11px] w-[11px] animate-spin" /> : <Plus className="h-[11px] w-[11px]" />}
+              {creatingRoom ? 'Creating Room...' : 'New Room'}
+            </button>
+          </div>
+        ) : null}
 
         <div className="mt-[20px] px-[4px]">
           <p className="text-[10px] uppercase tracking-[1px] text-navy-600">Current Room</p>
