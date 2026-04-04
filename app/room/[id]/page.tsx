@@ -33,6 +33,13 @@ type ParticipantRecord = {
   upi_id: string | null;
 };
 
+type ParticipantIdentityRecord = {
+  id: string;
+  name: string;
+  phone_number: string | null;
+  upi_id: string | null;
+};
+
 type ExpenseType = 'receipt' | 'manual';
 
 type ExpenseRecord = {
@@ -212,6 +219,13 @@ function getInitials(name: string) {
 function normalizePhoneNumber(phone: string | null | undefined) {
   if (!phone) return '';
   return phone.replace(/[^\d]/g, '');
+}
+
+function normalizeParticipantName(name: string) {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
 }
 
 function toReceiptCategory(rawCategory: unknown, itemName = ''): ReceiptCategory {
@@ -516,6 +530,7 @@ export default function RoomPage() {
   const [newUserPhone, setNewUserPhone] = useState('');
   const [newUserUpi, setNewUserUpi] = useState('');
   const [addingUser, setAddingUser] = useState(false);
+  const [removingParticipantId, setRemovingParticipantId] = useState<string | null>(null);
 
   const [showScanModal, setShowScanModal] = useState(false);
   const [scanExpenseTitle, setScanExpenseTitle] = useState('');
@@ -609,6 +624,31 @@ export default function RoomPage() {
       toastTimerRef.current = null;
     }, 3800);
   }, []);
+
+  const loadParticipantIdentityRows = useCallback(async () => {
+    const supabase = getSupabase();
+    const participantsQuery = await supabase
+      .from('participants')
+      .select('id, name, phone_number, upi_id')
+      .eq('session_id', roomId);
+
+    let rowsRaw = participantsQuery.data as Array<Record<string, unknown>> | null;
+    if (participantsQuery.error) {
+      const fallbackParticipantsQuery = await supabase
+        .from('participants')
+        .select('id, name')
+        .eq('session_id', roomId);
+      if (fallbackParticipantsQuery.error) throw new Error(fallbackParticipantsQuery.error.message);
+      rowsRaw = fallbackParticipantsQuery.data as Array<Record<string, unknown>> | null;
+    }
+
+    return (rowsRaw ?? []).map((row) => ({
+      id: String(row.id),
+      name: String(row.name ?? ''),
+      phone_number: typeof row.phone_number === 'string' ? row.phone_number : null,
+      upi_id: typeof row.upi_id === 'string' ? row.upi_id : null
+    })) as ParticipantIdentityRecord[];
+  }, [getSupabase, roomId]);
 
   useEffect(() => {
     itemsRef.current = items;
@@ -721,6 +761,8 @@ export default function RoomPage() {
     if (!currentParticipantId) return null;
     return participantsById[currentParticipantId] ?? null;
   }, [currentParticipantId, participantsById]);
+
+  const canManageParticipants = Boolean(currentParticipantId);
 
   useEffect(() => {
     setProfileName(currentParticipant?.name ?? '');
@@ -1695,10 +1737,52 @@ export default function RoomPage() {
 
     const phoneNumber = normalizePhoneNumber(joinPhone);
     const upiId = joinUpi.trim();
+    const normalizedName = normalizeParticipantName(name);
 
     setJoiningRoom(true);
     try {
       const supabase = getSupabase();
+      const identityRows = await loadParticipantIdentityRows();
+      const existingParticipant = identityRows.find(
+        (participant) => normalizeParticipantName(participant.name) === normalizedName
+      );
+
+      if (existingParticipant) {
+        const participantId = existingParticipant.id;
+        const existingPhone = normalizePhoneNumber(existingParticipant.phone_number);
+        const existingUpi = (existingParticipant.upi_id ?? '').trim();
+        const nextPhone = phoneNumber || existingPhone;
+        const nextUpi = upiId || existingUpi;
+
+        if (nextPhone !== existingPhone || nextUpi !== existingUpi) {
+          const updateQuery = await supabase
+            .from('participants')
+            .update({
+              phone_number: nextPhone || null,
+              upi_id: nextUpi || null
+            })
+            .eq('id', participantId);
+          if (updateQuery.error) throw new Error(updateQuery.error.message);
+        }
+
+        setCurrentParticipantId(participantId);
+        window.localStorage.setItem(participantStorageKey, participantId);
+        window.localStorage.setItem(
+          PROFILE_STORAGE_KEY,
+          JSON.stringify({
+            defaultName: existingParticipant.name || name,
+            whatsappNumber: nextPhone || '',
+            upiId: nextUpi || ''
+          })
+        );
+        setShowJoinModal(false);
+        setJoinName('');
+        setJoinPhone('');
+        setJoinUpi('');
+        pushToast('success', 'Welcome back. Joined using your existing participant profile.');
+        return;
+      }
+
       const { data, error } = await supabase
         .from('participants')
         .insert({
@@ -1734,7 +1818,16 @@ export default function RoomPage() {
     } finally {
       setJoiningRoom(false);
     }
-  }, [getSupabase, joinName, joinPhone, joinUpi, participantStorageKey, pushToast, roomId]);
+  }, [
+    getSupabase,
+    joinName,
+    joinPhone,
+    joinUpi,
+    loadParticipantIdentityRows,
+    participantStorageKey,
+    pushToast,
+    roomId
+  ]);
 
   const handleAddUser = useCallback(async () => {
     const name = newUserName.trim();
@@ -1743,9 +1836,26 @@ export default function RoomPage() {
       return;
     }
 
+    if (!canManageParticipants) {
+      pushToast('error', 'Join this room first before adding users.');
+      return;
+    }
+
+    const normalizedName = normalizeParticipantName(name);
+
     setAddingUser(true);
     try {
       const supabase = getSupabase();
+      const identityRows = await loadParticipantIdentityRows();
+      const existingParticipant = identityRows.find(
+        (participant) => normalizeParticipantName(participant.name) === normalizedName
+      );
+
+      if (existingParticipant) {
+        pushToast('error', `${existingParticipant.name} is already part of this trip.`);
+        return;
+      }
+
       const { error } = await supabase.from('participants').insert({
         session_id: roomId,
         name,
@@ -1766,7 +1876,94 @@ export default function RoomPage() {
     } finally {
       setAddingUser(false);
     }
-  }, [getSupabase, newUserName, newUserPhone, newUserUpi, pushToast, roomId]);
+  }, [
+    canManageParticipants,
+    getSupabase,
+    loadParticipantIdentityRows,
+    newUserName,
+    newUserPhone,
+    newUserUpi,
+    pushToast,
+    roomId
+  ]);
+
+  const handleRemoveParticipant = useCallback(
+    async (participantId: string) => {
+      if (!canManageParticipants || !currentParticipantId) {
+        pushToast('error', 'Join this room first before removing users.');
+        return;
+      }
+
+      if (participantId === currentParticipantId) {
+        pushToast('error', 'Host participant cannot remove themselves.');
+        return;
+      }
+
+      const participant = participantsById[participantId];
+      if (!participant) {
+        pushToast('error', 'Participant not found.');
+        return;
+      }
+
+      const shouldDelete = window.confirm(
+        `Remove "${participant.name}" from this trip? This will remove their split assignments.`
+      );
+      if (!shouldDelete) return;
+
+      setRemovingParticipantId(participantId);
+      try {
+        const supabase = getSupabase();
+        const payerExpenseQuery = await supabase
+          .from('expenses')
+          .select('id')
+          .eq('session_id', roomId)
+          .eq('payer_id', participantId)
+          .limit(1);
+        if (payerExpenseQuery.error) throw new Error(payerExpenseQuery.error.message);
+        if ((payerExpenseQuery.data ?? []).length > 0) {
+          throw new Error(
+            `${participant.name} has paid expenses. Reassign or delete those expenses before removing this user.`
+          );
+        }
+
+        const deleteAssignmentsQuery = await supabase
+          .from('item_assignments')
+          .delete()
+          .eq('participant_id', participantId);
+        if (deleteAssignmentsQuery.error) throw new Error(deleteAssignmentsQuery.error.message);
+
+        const deleteParticipantQuery = await supabase
+          .from('participants')
+          .delete()
+          .eq('id', participantId)
+          .eq('session_id', roomId);
+        if (deleteParticipantQuery.error) throw new Error(deleteParticipantQuery.error.message);
+
+        setParticipants((current) => removeById(current, participantId));
+        setItemAssignments((current) =>
+          current.filter((assignment) => assignment.participant_id !== participantId)
+        );
+        setSettledAmountsByParticipant((current) => {
+          const copy = { ...current };
+          delete copy[participantId];
+          return copy;
+        });
+        pushToast('success', `${participant.name} removed from this trip.`);
+      } catch (error) {
+        pushToast('error', error instanceof Error ? error.message : 'Unable to remove this user.');
+      } finally {
+        setRemovingParticipantId(null);
+      }
+    },
+    [
+      canManageParticipants,
+      currentParticipantId,
+      getSupabase,
+      participantsById,
+      pushToast,
+      roomId
+    ]
+  );
 
   const createExpense = useCallback(
     async (title: string, payerId: string, type: ExpenseType) => {
@@ -2677,6 +2874,16 @@ export default function RoomPage() {
       return;
     }
 
+    const conflictingParticipant = participants.find(
+      (participant) =>
+        participant.id !== currentParticipantId &&
+        normalizeParticipantName(participant.name) === normalizeParticipantName(name)
+    );
+    if (conflictingParticipant) {
+      pushToast('error', `${conflictingParticipant.name} is already using this name in the room.`);
+      return;
+    }
+
     const normalizedPhone = normalizePhoneNumber(profilePhone);
     const upiId = profileUpi.trim();
 
@@ -2732,6 +2939,7 @@ export default function RoomPage() {
     currentParticipantId,
     getSupabase,
     loadPastSplitsByPhone,
+    participants,
     profileName,
     profilePhone,
     profileUpi,
@@ -3341,13 +3549,39 @@ export default function RoomPage() {
 
                 <div className="rounded-card border border-border bg-card px-[12px] py-[12px]">
                   <p className="text-[10px] uppercase tracking-[0.9px] text-muted">Participants</p>
+                  <p className="mt-[2px] text-[12px] text-muted">
+                    Host can remove users who have no paid expenses linked to them.
+                  </p>
                   <div className="mt-[8px] space-y-[8px]">
                     {participants.map((participant) => (
                       <div
                         key={participant.id}
                         className="rounded-input border border-divider px-[10px] py-[8px]"
                       >
-                        <p className="text-[13px] font-medium text-[#1C1917]">{participant.name}</p>
+                        <div className="flex items-center justify-between gap-[8px]">
+                          <p className="text-[13px] font-medium text-[#1C1917]">{participant.name}</p>
+                          {participant.id === currentParticipantId ? (
+                            <span className="rounded-pill border border-[#BBF7D0] bg-[#F0FDF4] px-[8px] py-[3px] text-[10px] font-medium text-[#166534]">
+                              Host
+                            </span>
+                          ) : canManageParticipants ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void handleRemoveParticipant(participant.id);
+                              }}
+                              disabled={removingParticipantId === participant.id}
+                              className="inline-flex h-[26px] items-center gap-[4px] rounded-input border border-[#FECACA] bg-[#FEF2F2] px-[8px] text-[11px] text-[#B91C1C] transition-[background-color] duration-150 ease-linear hover:bg-[#FEE2E2] disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              {removingParticipantId === participant.id ? (
+                                <Loader2 className="h-[11px] w-[11px] animate-spin" />
+                              ) : (
+                                <Trash2 className="h-[11px] w-[11px]" />
+                              )}
+                              Remove
+                            </button>
+                          ) : null}
+                        </div>
                         <p className="mt-[1px] text-[11px] text-muted">
                           Phone: {participant.phone_number || 'Not set'}
                         </p>
