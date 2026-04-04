@@ -558,6 +558,7 @@ export default function RoomPage() {
   const [scanningReceipt, setScanningReceipt] = useState(false);
   const [scanProgressPct, setScanProgressPct] = useState(0);
   const [scanProgressLabel, setScanProgressLabel] = useState('');
+  const [creatingRoom, setCreatingRoom] = useState(false);
 
   const [showManualExpenseModal, setShowManualExpenseModal] = useState(false);
   const [manualExpenseTitle, setManualExpenseTitle] = useState('');
@@ -2201,6 +2202,26 @@ export default function RoomPage() {
     uploadReceiptToStorage
   ]);
 
+  const handleCreateNewRoom = useCallback(async () => {
+    if (creatingRoom) return;
+
+    setCreatingRoom(true);
+    try {
+      const supabase = getSupabase();
+      const { data, error } = await supabase.from('sessions').insert({}).select('id').single();
+
+      if (error || !data?.id) {
+        throw new Error(error?.message ?? 'Unable to create a new room.');
+      }
+
+      router.push(`/room/${data.id}`);
+    } catch (error) {
+      pushToast('error', error instanceof Error ? error.message : 'Unable to create a new room.');
+    } finally {
+      setCreatingRoom(false);
+    }
+  }, [creatingRoom, getSupabase, pushToast, router]);
+
   const openReceiptViewer = useCallback((url: string, title: string) => {
     setActiveReceiptViewer({ url, title });
     setReceiptZoom(1);
@@ -3294,6 +3315,22 @@ export default function RoomPage() {
               <div className="flex flex-wrap items-center gap-[8px]">
                 <button
                   type="button"
+                  disabled={creatingRoom}
+                  onClick={() => {
+                    void handleCreateNewRoom();
+                  }}
+                  className="inline-flex h-[34px] items-center gap-[6px] rounded-input border border-[#E0DDD6] bg-white px-[11px] text-[12px] text-[#1C1917] transition-[background-color] duration-150 ease-linear hover:bg-dim disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {creatingRoom ? (
+                    <Loader2 className="h-[12px] w-[12px] animate-spin" />
+                  ) : (
+                    <Plus className="h-[12px] w-[12px]" />
+                  )}
+                  {creatingRoom ? 'Creating Room...' : 'New Room'}
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => setShowAddUserModal(true)}
                   className="inline-flex h-[34px] items-center gap-[6px] rounded-input border border-[#E0DDD6] bg-white px-[11px] text-[12px] text-[#1C1917] transition-[background-color] duration-150 ease-linear hover:bg-dim"
                 >
@@ -3441,21 +3478,28 @@ export default function RoomPage() {
                               </div>
                             </button>
 
+                            {expense.expense_type === 'receipt' ? (
+                              <div className="flex flex-wrap items-center justify-between gap-[6px] border-t border-divider px-[12px] py-[8px] bg-white">
+                                <p className="text-[10px] uppercase tracking-[0.8px] text-muted">
+                                  Receipt
+                                </p>
+                                {expense.receipt_url ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => openReceiptViewer(expense.receipt_url ?? '', expense.title)}
+                                    className="inline-flex h-[28px] items-center gap-[6px] rounded-input border border-border bg-white px-[10px] text-[11px] font-medium text-[#1C1917] transition-[background-color] duration-150 ease-linear hover:bg-dim"
+                                  >
+                                    <ExternalLink className="h-[11px] w-[11px]" />
+                                    View Receipt
+                                  </button>
+                                ) : (
+                                  <p className="text-[11px] text-muted">Receipt image unavailable for this expense.</p>
+                                )}
+                              </div>
+                            ) : null}
+
                             {isOpen && (
                               <div className="border-t border-divider bg-canvas px-[12px] py-[12px]">
-                                {expense.receipt_url ? (
-                                  <div className="mb-[10px] flex justify-end">
-                                    <button
-                                      type="button"
-                                      onClick={() => openReceiptViewer(expense.receipt_url ?? '', expense.title)}
-                                      className="inline-flex h-[30px] items-center gap-[6px] rounded-input border border-border bg-white px-[10px] text-[11px] font-medium text-[#1C1917] transition-[background-color] duration-150 ease-linear hover:bg-dim"
-                                    >
-                                      <ExternalLink className="h-[11px] w-[11px]" />
-                                      View Original Receipt
-                                    </button>
-                                  </div>
-                                ) : null}
-
                                 {categories.map((category) => {
                                   if (isManualExpense && category.items.length === 0) return null;
 
