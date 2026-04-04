@@ -1,17 +1,30 @@
 'use client';
 
-import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ChangeEvent,
+  PointerEvent as ReactPointerEvent,
+  WheelEvent as ReactWheelEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react';
 import {
   Check,
   Camera,
   ChevronDown,
   ChevronUp,
   Download,
+  ExternalLink,
   Loader2,
   Pencil,
   Plus,
+  RotateCcw,
   Sparkles,
   Trash2,
+  ZoomIn,
+  ZoomOut,
   X,
   UserPlus
 } from 'lucide-react';
@@ -49,6 +62,7 @@ type ExpenseRecord = {
   payer_id: string;
   title: string;
   expense_type: ExpenseType;
+  receipt_url: string | null;
 };
 
 type ReceiptCategory =
@@ -208,6 +222,10 @@ function parseTaxMultiplier(value: unknown, fallback = 1) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return parsed;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function getInitials(name: string) {
@@ -538,6 +556,8 @@ export default function RoomPage() {
   const [scanPayerId, setScanPayerId] = useState('');
   const [scanFile, setScanFile] = useState<File | null>(null);
   const [scanningReceipt, setScanningReceipt] = useState(false);
+  const [scanProgressPct, setScanProgressPct] = useState(0);
+  const [scanProgressLabel, setScanProgressLabel] = useState('');
 
   const [showManualExpenseModal, setShowManualExpenseModal] = useState(false);
   const [manualExpenseTitle, setManualExpenseTitle] = useState('');
@@ -578,6 +598,9 @@ export default function RoomPage() {
   const [profileUpi, setProfileUpi] = useState('');
   const [savingProfile, setSavingProfile] = useState(false);
   const [upiPaymentSheet, setUpiPaymentSheet] = useState<UpiPaymentSheet | null>(null);
+  const [activeReceiptViewer, setActiveReceiptViewer] = useState<{ url: string; title: string } | null>(null);
+  const [receiptZoom, setReceiptZoom] = useState(1);
+  const [receiptPan, setReceiptPan] = useState({ x: 0, y: 0 });
 
   const publicShareBaseUrl = useMemo(() => {
     const configuredBase = String(process.env.NEXT_PUBLIC_APP_URL ?? '').trim();
@@ -612,6 +635,17 @@ export default function RoomPage() {
   const expenseIdsRef = useRef<Set<string>>(new Set());
   const itemIdsRef = useRef<Set<string>>(new Set());
   const participantIdsRef = useRef<Set<string>>(new Set());
+  const receiptPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const receiptGestureRef = useRef({
+    startScale: 1,
+    startDistance: 0,
+    startCenterX: 0,
+    startCenterY: 0,
+    panStartX: 0,
+    panStartY: 0,
+    dragStartX: 0,
+    dragStartY: 0
+  });
 
   const pushToast = useCallback((type: ToastState['type'], message: string) => {
     if (toastTimerRef.current) {
@@ -770,6 +804,18 @@ export default function RoomPage() {
     setProfilePhone(currentParticipant?.phone_number ?? '');
     setProfileUpi(currentParticipant?.upi_id ?? '');
   }, [currentParticipant]);
+
+  useEffect(() => {
+    if (!activeReceiptViewer) return;
+
+    const previousOverflow = document.body.style.overflow;
+    const pointers = receiptPointersRef.current;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      pointers.clear();
+    };
+  }, [activeReceiptViewer]);
 
   const qtyMapByItem = useMemo(() => {
     const map: Record<string, Record<string, number>> = {};
@@ -1102,16 +1148,26 @@ export default function RoomPage() {
 
       const expensesQuery = await supabase
         .from('expenses')
-        .select('id, session_id, payer_id, title, expense_type')
+        .select('id, session_id, payer_id, title, expense_type, receipt_url')
         .eq('session_id', roomId);
-      if (expensesQuery.error) throw new Error(expensesQuery.error.message);
 
-      const expenseRows: ExpenseRecord[] = (expensesQuery.data ?? []).map((row) => ({
+      let expenseRowsRaw = expensesQuery.data as Array<Record<string, unknown>> | null;
+      if (expensesQuery.error) {
+        const fallbackExpensesQuery = await supabase
+          .from('expenses')
+          .select('id, session_id, payer_id, title, expense_type')
+          .eq('session_id', roomId);
+        if (fallbackExpensesQuery.error) throw new Error(fallbackExpensesQuery.error.message);
+        expenseRowsRaw = fallbackExpensesQuery.data as Array<Record<string, unknown>> | null;
+      }
+
+      const expenseRows: ExpenseRecord[] = (expenseRowsRaw ?? []).map((row) => ({
         id: String(row.id),
         session_id: String(row.session_id),
         payer_id: String(row.payer_id),
         title: String(row.title),
-        expense_type: (row.expense_type ?? 'manual') as ExpenseType
+        expense_type: (row.expense_type ?? 'manual') as ExpenseType,
+        receipt_url: typeof row.receipt_url === 'string' ? row.receipt_url : null
       }));
 
       let itemRows: ItemRecord[] = [];
@@ -1262,7 +1318,8 @@ export default function RoomPage() {
               session_id: String(next.session_id),
               payer_id: String(next.payer_id),
               title: String(next.title),
-              expense_type: (next.expense_type ?? 'manual') as ExpenseType
+              expense_type: (next.expense_type ?? 'manual') as ExpenseType,
+              receipt_url: typeof next.receipt_url === 'string' ? next.receipt_url : null
             })
           );
           return;
@@ -1270,13 +1327,24 @@ export default function RoomPage() {
 
         if (payload.eventType === 'UPDATE' && next.id && next.session_id && next.payer_id && next.title) {
           setExpenses((current) =>
-            upsertById(current, {
-              id: String(next.id),
-              session_id: String(next.session_id),
-              payer_id: String(next.payer_id),
-              title: String(next.title),
-              expense_type: (next.expense_type ?? 'manual') as ExpenseType
-            })
+            {
+              const existingReceiptUrl =
+                current.find((expense) => expense.id === String(next.id))?.receipt_url ?? null;
+              const nextReceiptUrl = Object.prototype.hasOwnProperty.call(next, 'receipt_url')
+                ? typeof next.receipt_url === 'string'
+                  ? next.receipt_url
+                  : null
+                : existingReceiptUrl;
+
+              return upsertById(current, {
+                id: String(next.id),
+                session_id: String(next.session_id),
+                payer_id: String(next.payer_id),
+                title: String(next.title),
+                expense_type: (next.expense_type ?? 'manual') as ExpenseType,
+                receipt_url: nextReceiptUrl
+              });
+            }
           );
           return;
         }
@@ -1926,21 +1994,62 @@ export default function RoomPage() {
   );
 
   const createExpense = useCallback(
-    async (title: string, payerId: string, type: ExpenseType) => {
+    async (title: string, payerId: string, type: ExpenseType, options?: { receiptUrl?: string | null }) => {
       const supabase = getSupabase();
-      const { data, error } = await supabase
+      const insertPayload = {
+        session_id: roomId,
+        payer_id: payerId,
+        title,
+        expense_type: type
+      };
+
+      let createQuery = await supabase
         .from('expenses')
         .insert({
-          session_id: roomId,
-          payer_id: payerId,
-          title,
-          expense_type: type
+          ...insertPayload,
+          receipt_url: options?.receiptUrl ?? null
         })
         .select('id')
         .single();
 
-      if (error || !data?.id) throw new Error(error?.message ?? 'Unable to create expense.');
-      return String(data.id);
+      if (createQuery.error) {
+        createQuery = await supabase.from('expenses').insert(insertPayload).select('id').single();
+      }
+
+      if (createQuery.error || !createQuery.data?.id) {
+        throw new Error(createQuery.error?.message ?? 'Unable to create expense.');
+      }
+
+      return String(createQuery.data.id);
+    },
+    [getSupabase, roomId]
+  );
+
+  const uploadReceiptToStorage = useCallback(
+    async (file: File) => {
+      const supabase = getSupabase();
+      const extension = file.name.split('.').pop()?.toLowerCase() || 'jpg';
+      const safeBaseName = file.name
+        .replace(/\.[^/.]+$/, '')
+        .replace(/[^a-zA-Z0-9-_]+/g, '-')
+        .replace(/-+/g, '-')
+        .toLowerCase()
+        .slice(0, 50) || 'receipt';
+
+      const objectPath = `${roomId}/${Date.now()}-${Math.random().toString(36).slice(2, 9)}-${safeBaseName}.${extension}`;
+      const uploadQuery = await supabase.storage.from('receipts').upload(objectPath, file, {
+        contentType: file.type || undefined,
+        cacheControl: '3600',
+        upsert: false
+      });
+
+      if (uploadQuery.error) throw new Error(uploadQuery.error.message);
+
+      const publicUrlData = supabase.storage.from('receipts').getPublicUrl(objectPath);
+      const url = publicUrlData.data.publicUrl;
+      if (!url) throw new Error('Unable to generate public URL for this receipt image.');
+
+      return url;
     },
     [getSupabase, roomId]
   );
@@ -1959,10 +2068,17 @@ export default function RoomPage() {
     }
 
     setScanningReceipt(true);
+    setScanProgressPct(8);
+    setScanProgressLabel('Uploading receipt image...');
 
     try {
+      const receiptUrl = await uploadReceiptToStorage(scanFile);
+      setScanProgressPct(40);
+      setScanProgressLabel('Analyzing receipt with AI...');
+
       const formData = new FormData();
       formData.append('file', scanFile);
+      formData.append('receipt_url', receiptUrl);
 
       const response = await fetch('/api/scan-receipt', {
         method: 'POST',
@@ -1972,10 +2088,13 @@ export default function RoomPage() {
       const payload = (await response.json()) as {
         categories?: unknown;
         items?: unknown;
+        receiptUrl?: string | null;
         error?: string;
       };
 
       if (!response.ok) throw new Error(payload.error ?? 'Receipt scan failed.');
+      setScanProgressPct(62);
+      setScanProgressLabel('Saving expense and split details...');
 
       const scannedItems = extractScannedItems(payload);
       if (scannedItems.length === 0) {
@@ -1983,7 +2102,9 @@ export default function RoomPage() {
       }
 
       const supabase = getSupabase();
-      const expenseId = await createExpense(title, payerId, 'receipt');
+      const expenseId = await createExpense(title, payerId, 'receipt', {
+        receiptUrl: payload.receiptUrl || receiptUrl
+      });
 
       const insertRows = scannedItems.map((item) => ({
         expense_id: expenseId,
@@ -2038,6 +2159,8 @@ export default function RoomPage() {
         if (assignmentInsert.error) throw new Error(assignmentInsert.error.message);
       }
 
+      setScanProgressPct(100);
+      setScanProgressLabel('Done.');
       setExpandedExpenseIds((current) => {
         const copy = new Set(current);
         copy.add(expenseId);
@@ -2048,6 +2171,8 @@ export default function RoomPage() {
       setScanExpenseTitle('');
       setScanPayerId('');
       setScanFile(null);
+      setScanProgressPct(0);
+      setScanProgressLabel('');
 
       pushToast(
         'success',
@@ -2061,6 +2186,8 @@ export default function RoomPage() {
       pushToast('error', error instanceof Error ? error.message : 'Unable to create scanned expense.');
     } finally {
       setScanningReceipt(false);
+      setScanProgressPct(0);
+      setScanProgressLabel('');
     }
   }, [
     createExpense,
@@ -2070,8 +2197,124 @@ export default function RoomPage() {
     scanExpenseTitle,
     scanFile,
     scanPayerId,
-    selectedCollectorId
+    selectedCollectorId,
+    uploadReceiptToStorage
   ]);
+
+  const openReceiptViewer = useCallback((url: string, title: string) => {
+    setActiveReceiptViewer({ url, title });
+    setReceiptZoom(1);
+    setReceiptPan({ x: 0, y: 0 });
+    receiptPointersRef.current.clear();
+  }, []);
+
+  const closeReceiptViewer = useCallback(() => {
+    setActiveReceiptViewer(null);
+    setReceiptZoom(1);
+    setReceiptPan({ x: 0, y: 0 });
+    receiptPointersRef.current.clear();
+  }, []);
+
+  const resetReceiptViewerTransform = useCallback(() => {
+    setReceiptZoom(1);
+    setReceiptPan({ x: 0, y: 0 });
+  }, []);
+
+  const zoomReceipt = useCallback((direction: 'in' | 'out') => {
+    setReceiptZoom((current) => {
+      const next = direction === 'in' ? current + 0.25 : current - 0.25;
+      const normalized = clamp(next, 1, 5);
+      if (normalized <= 1) setReceiptPan({ x: 0, y: 0 });
+      return normalized;
+    });
+  }, []);
+
+  const handleReceiptWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setReceiptZoom((current) => {
+      const next = event.deltaY < 0 ? current + 0.18 : current - 0.18;
+      const normalized = clamp(next, 1, 5);
+      if (normalized <= 1) setReceiptPan({ x: 0, y: 0 });
+      return normalized;
+    });
+  }, []);
+
+  const handleReceiptPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const target = event.currentTarget;
+      target.setPointerCapture(event.pointerId);
+      receiptPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+      const pointers = Array.from(receiptPointersRef.current.values());
+      if (pointers.length === 1) {
+        receiptGestureRef.current.dragStartX = event.clientX;
+        receiptGestureRef.current.dragStartY = event.clientY;
+        receiptGestureRef.current.panStartX = receiptPan.x;
+        receiptGestureRef.current.panStartY = receiptPan.y;
+      } else if (pointers.length >= 2) {
+        const [a, b] = pointers;
+        receiptGestureRef.current.startDistance = Math.hypot(a.x - b.x, a.y - b.y);
+        receiptGestureRef.current.startScale = receiptZoom;
+        receiptGestureRef.current.startCenterX = (a.x + b.x) / 2;
+        receiptGestureRef.current.startCenterY = (a.y + b.y) / 2;
+        receiptGestureRef.current.panStartX = receiptPan.x;
+        receiptGestureRef.current.panStartY = receiptPan.y;
+      }
+    },
+    [receiptPan.x, receiptPan.y, receiptZoom]
+  );
+
+  const handleReceiptPointerMove = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (!receiptPointersRef.current.has(event.pointerId)) return;
+
+      receiptPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      const pointers = Array.from(receiptPointersRef.current.values());
+
+      if (pointers.length >= 2) {
+        const [a, b] = pointers;
+        const distance = Math.hypot(a.x - b.x, a.y - b.y);
+        const centerX = (a.x + b.x) / 2;
+        const centerY = (a.y + b.y) / 2;
+        const baseDistance = receiptGestureRef.current.startDistance || distance || 1;
+        const nextScale = clamp((receiptGestureRef.current.startScale * distance) / baseDistance, 1, 5);
+        setReceiptZoom(nextScale);
+        setReceiptPan({
+          x: receiptGestureRef.current.panStartX + (centerX - receiptGestureRef.current.startCenterX),
+          y: receiptGestureRef.current.panStartY + (centerY - receiptGestureRef.current.startCenterY)
+        });
+        return;
+      }
+
+      if (pointers.length === 1 && receiptZoom > 1) {
+        const maxPan = Math.max((receiptZoom - 1) * 320, 0);
+        const deltaX = event.clientX - receiptGestureRef.current.dragStartX;
+        const deltaY = event.clientY - receiptGestureRef.current.dragStartY;
+        setReceiptPan({
+          x: clamp(receiptGestureRef.current.panStartX + deltaX, -maxPan, maxPan),
+          y: clamp(receiptGestureRef.current.panStartY + deltaY, -maxPan, maxPan)
+        });
+      }
+    },
+    [receiptZoom]
+  );
+
+  const handleReceiptPointerUp = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      receiptPointersRef.current.delete(event.pointerId);
+      const pointers = Array.from(receiptPointersRef.current.values());
+      if (pointers.length === 1) {
+        receiptGestureRef.current.dragStartX = pointers[0].x;
+        receiptGestureRef.current.dragStartY = pointers[0].y;
+        receiptGestureRef.current.panStartX = receiptPan.x;
+        receiptGestureRef.current.panStartY = receiptPan.y;
+      }
+      if (pointers.length === 0 && receiptZoom <= 1.01) {
+        setReceiptPan({ x: 0, y: 0 });
+      }
+    },
+    [receiptPan.x, receiptPan.y, receiptZoom]
+  );
 
   const toggleManualSplitParticipant = useCallback((participantId: string) => {
     setManualSplitParticipantIds((current) =>
@@ -3038,6 +3281,7 @@ export default function RoomPage() {
           />
         }
         mobileTabs={<MobileTabBar activeTab={activeTab} onTabChange={setActiveTab} />}
+        showInstallButton={activeTab === 'settings'}
       >
         <div className="min-h-dvh">
           <header className="sticky top-0 z-10 border-b border-border bg-canvas px-[22px] py-[18px]">
@@ -3103,6 +3347,8 @@ export default function RoomPage() {
                   onClick={() => {
                     setShowScanModal(true);
                     setScanPayerId(selectedCollectorId ?? '');
+                    setScanProgressPct(0);
+                    setScanProgressLabel('');
                   }}
                   className="inline-flex h-[34px] items-center gap-[6px] rounded-input bg-amber px-[11px] text-[12px] font-medium text-white transition-[background-color] duration-150 ease-linear hover:bg-[#D97706]"
                 >
@@ -3197,6 +3443,19 @@ export default function RoomPage() {
 
                             {isOpen && (
                               <div className="border-t border-divider bg-canvas px-[12px] py-[12px]">
+                                {expense.receipt_url ? (
+                                  <div className="mb-[10px] flex justify-end">
+                                    <button
+                                      type="button"
+                                      onClick={() => openReceiptViewer(expense.receipt_url ?? '', expense.title)}
+                                      className="inline-flex h-[30px] items-center gap-[6px] rounded-input border border-border bg-white px-[10px] text-[11px] font-medium text-[#1C1917] transition-[background-color] duration-150 ease-linear hover:bg-dim"
+                                    >
+                                      <ExternalLink className="h-[11px] w-[11px]" />
+                                      View Original Receipt
+                                    </button>
+                                  </div>
+                                ) : null}
+
                                 {categories.map((category) => {
                                   if (isManualExpense && category.items.length === 0) return null;
 
@@ -3743,14 +4002,32 @@ export default function RoomPage() {
               />
             </div>
 
+            {scanningReceipt ? (
+              <div className="mt-[10px] rounded-input border border-border bg-canvas px-[10px] py-[9px]">
+                <div className="flex items-center justify-between text-[11px] text-[#1C1917]">
+                  <p className="font-medium">{scanProgressLabel || 'Uploading & Analyzing...'}</p>
+                  <p className="tabular-nums text-muted">{Math.round(scanProgressPct)}%</p>
+                </div>
+                <div className="mt-[6px] h-[7px] overflow-hidden rounded-full bg-[#E7E5E4]">
+                  <div
+                    className="h-full rounded-full bg-[#1C1917] transition-all duration-300 ease-linear"
+                    style={{ width: `${Math.max(6, Math.round(scanProgressPct))}%` }}
+                  />
+                </div>
+              </div>
+            ) : null}
+
             <div className="mt-[12px] flex items-center justify-end gap-[8px]">
               <button
                 type="button"
+                disabled={scanningReceipt}
                 onClick={() => {
                   setShowScanModal(false);
                   setScanFile(null);
+                  setScanProgressPct(0);
+                  setScanProgressLabel('');
                 }}
-                className="h-[34px] rounded-input border border-border bg-white px-[12px] text-[12px] text-[#1C1917] transition-[background-color] duration-150 ease-linear hover:bg-dim"
+                className="h-[34px] rounded-input border border-border bg-white px-[12px] text-[12px] text-[#1C1917] transition-[background-color] duration-150 ease-linear hover:bg-dim disabled:cursor-not-allowed disabled:opacity-60"
               >
                 Cancel
               </button>
@@ -3764,9 +4041,79 @@ export default function RoomPage() {
                 className="inline-flex h-[34px] items-center gap-[6px] rounded-input bg-[#1C1917] px-[12px] text-[12px] font-medium text-white transition-[background-color] duration-150 ease-linear hover:bg-black disabled:cursor-not-allowed disabled:bg-[#57534E]"
               >
                 {scanningReceipt ? <Loader2 className="h-[12px] w-[12px] animate-spin" /> : <Camera className="h-[12px] w-[12px]" />}
-                {scanningReceipt ? 'Scanning...' : 'Create Expense'}
+                {scanningReceipt ? 'Uploading & Analyzing...' : 'Create Expense'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {activeReceiptViewer && (
+        <div className="fixed inset-0 z-[70] bg-black/95">
+          <div className="absolute left-0 right-0 top-0 flex items-center justify-between gap-[8px] border-b border-white/15 bg-black/55 px-[12px] py-[10px] backdrop-blur-sm">
+            <p className="truncate text-[12px] font-medium text-white">{activeReceiptViewer.title}</p>
+            <div className="flex items-center gap-[6px]">
+              <button
+                type="button"
+                onClick={() => zoomReceipt('out')}
+                className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-[8px] border border-white/30 bg-black/40 text-white"
+                aria-label="Zoom out"
+              >
+                <ZoomOut className="h-[14px] w-[14px]" />
+              </button>
+              <button
+                type="button"
+                onClick={() => zoomReceipt('in')}
+                className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-[8px] border border-white/30 bg-black/40 text-white"
+                aria-label="Zoom in"
+              >
+                <ZoomIn className="h-[14px] w-[14px]" />
+              </button>
+              <button
+                type="button"
+                onClick={resetReceiptViewerTransform}
+                className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-[8px] border border-white/30 bg-black/40 text-white"
+                aria-label="Reset zoom"
+              >
+                <RotateCcw className="h-[14px] w-[14px]" />
+              </button>
+              <button
+                type="button"
+                onClick={closeReceiptViewer}
+                className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-[8px] border border-white/30 bg-black/40 text-white"
+                aria-label="Close receipt viewer"
+              >
+                <X className="h-[14px] w-[14px]" />
+              </button>
+            </div>
+          </div>
+
+          <div
+            className="absolute inset-0 top-[52px] flex touch-none items-center justify-center overflow-hidden px-[12px] pb-[20px]"
+            onClick={closeReceiptViewer}
+            onWheel={handleReceiptWheel}
+            onPointerDown={handleReceiptPointerDown}
+            onPointerMove={handleReceiptPointerMove}
+            onPointerUp={handleReceiptPointerUp}
+            onPointerCancel={handleReceiptPointerUp}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={activeReceiptViewer.url}
+              alt={`${activeReceiptViewer.title} receipt`}
+              onClick={(event) => event.stopPropagation()}
+              draggable={false}
+              className="max-h-full max-w-full select-none object-contain"
+              style={{
+                transform: `translate(${receiptPan.x}px, ${receiptPan.y}px) scale(${receiptZoom})`,
+                transformOrigin: 'center center',
+                transition: receiptPointersRef.current.size > 0 ? 'none' : 'transform 110ms linear'
+              }}
+            />
+          </div>
+
+          <div className="pointer-events-none absolute bottom-[14px] left-0 right-0 px-[14px] text-center text-[11px] text-white/75">
+            Pinch to zoom • Drag to pan • Tap outside to close
           </div>
         </div>
       )}

@@ -289,6 +289,11 @@ export async function POST(request: Request) {
   try {
     const formData = await request.formData();
     const file = formData.get('file');
+    const receiptUrlRaw = formData.get('receipt_url');
+    const receiptUrl =
+      typeof receiptUrlRaw === 'string' && receiptUrlRaw.trim().length > 0
+        ? receiptUrlRaw.trim()
+        : null;
 
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "Missing 'file' in request body." }, { status: 400 });
@@ -327,7 +332,7 @@ export async function POST(request: Request) {
     const categories = sanitizeScannedCategories(parsedPayload);
     const items = flattenCategories(categories);
 
-    return NextResponse.json({ categories, items }, { status: 200 });
+    return NextResponse.json({ categories, items, receiptUrl }, { status: 200 });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Receipt scan failed.';
     return NextResponse.json({ error: message }, { status: 500 });

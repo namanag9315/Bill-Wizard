@@ -95,6 +95,7 @@ export default function SettingsPage() {
         />
       }
       mobileTabs={<MobileTabBar activeTab="settings" onTabChange={handleTabChange} />}
+      showInstallButton
     >
       <div className="min-h-dvh px-[22px] py-[18px]">
         <header className="mb-[12px] rounded-card border border-border bg-card px-[14px] py-[12px]">
