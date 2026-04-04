@@ -253,6 +253,17 @@ function isRlsPolicyError(error: unknown) {
   );
 }
 
+function isStorageUploadRlsError(error: unknown) {
+  if (!isRlsPolicyError(error)) return false;
+  const message = readErrorMessage(error).toLowerCase();
+  return (
+    message.includes('storage') ||
+    message.includes('objects') ||
+    message.includes('bucket') ||
+    message.includes('object')
+  );
+}
+
 function formatDbErrorMessage(error: unknown, fallback: string) {
   if (isRlsPolicyError(error)) {
     const message = readErrorMessage(error);
@@ -2143,10 +2154,10 @@ export default function RoomPage() {
       try {
         receiptUrl = await uploadReceiptToStorage(scanFile);
       } catch (uploadError) {
-        if (!isMissingBucketError(uploadError)) throw uploadError;
+        if (!isMissingBucketError(uploadError) && !isStorageUploadRlsError(uploadError)) throw uploadError;
         skippedReceiptUpload = true;
         setScanProgressPct((current) => Math.max(current, 30));
-        setScanProgressLabel('Storage bucket missing. Continuing analysis without image backup...');
+        setScanProgressLabel('Storage setup incomplete. Continuing analysis without image backup...');
       }
 
       setScanProgressPct((current) => Math.max(current, 42));
@@ -2261,7 +2272,7 @@ export default function RoomPage() {
             : ''
         }${
           skippedReceiptUpload
-            ? ' Receipt image was not saved because storage bucket "receipts" is missing. Create that bucket in Supabase to enable receipt viewing.'
+            ? ' Receipt image was not saved due to Storage setup/policy issue. Configure Supabase bucket "receipts" and its insert policy to enable receipt viewing.'
             : ''
         }`
       );
