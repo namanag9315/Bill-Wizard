@@ -4038,7 +4038,6 @@ export default function RoomPage() {
               <input
                 type="file"
                 accept="image/*"
-                capture="environment"
                 onChange={(event: ChangeEvent<HTMLInputElement>) => {
                   setScanFile(event.target.files?.[0] ?? null);
                 }}
